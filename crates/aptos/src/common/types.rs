@@ -184,7 +184,7 @@ impl From<hex::FromHexError> for CliError {
 
 impl From<anyhow::Error> for CliError {
     fn from(e: anyhow::Error) -> Self {
-        CliError::UnexpectedError(e.to_string())
+        CliError::UnexpectedError(format!("{:#}", e))
     }
 }
 
@@ -999,7 +999,7 @@ pub fn account_address_from_public_key(public_key: &Ed25519PublicKey) -> Account
 }
 
 pub fn account_address_from_auth_key(auth_key: &AuthenticationKey) -> AccountAddress {
-    AccountAddress::new(*auth_key.derived_address())
+    AccountAddress::new(*auth_key.account_address())
 }
 
 #[derive(Debug, Parser)]
