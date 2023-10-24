@@ -3,17 +3,21 @@
 
 use crate::{
     captured_reads::CapturedReads,
-    errors::Error,
-    task::{ExecutionStatus, Transaction, TransactionOutput},
+    errors::{Error, IntentionalFallbackToSequential},
+    task::{ExecutionStatus, TransactionOutput},
 };
-use anyhow::anyhow;
+use aptos_aggregator::types::PanicOr;
 use aptos_mvhashmap::types::TxnIndex;
-use aptos_types::{fee_statement::FeeStatement, write_set::WriteOp};
+use aptos_types::{
+    fee_statement::FeeStatement, transaction::BlockExecutableTransaction as Transaction,
+    write_set::WriteOp,
+};
 use arc_swap::ArcSwapOption;
 use crossbeam::utils::CachePadded;
 use dashmap::DashSet;
+use move_core_types::value::MoveTypeLayout;
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     fmt::Debug,
     iter::{empty, Iterator},
     sync::{
@@ -88,7 +92,7 @@ impl<T: Transaction, O: TransactionOutput<Txn = T>, E: Debug + Send + Clone>
         false
     }
 
-    /// Returns an error if a module path that was read was previously written to, and vice versa.
+    /// Returns false on an error - if a module path that was read was previously written to, and vice versa.
     /// Since parallel executor is instantiated per block, any module that is in the Move-VM loader
     /// cache must previously be read and would be recorded in the 'module_reads' set. Any module
     /// that is written (published or re-published) goes through transaction output write-set and
@@ -105,12 +109,15 @@ impl<T: Transaction, O: TransactionOutput<Txn = T>, E: Debug + Send + Clone>
         txn_idx: TxnIndex,
         input: CapturedReads<T>,
         output: ExecutionStatus<O, Error<E>>,
-    ) -> anyhow::Result<()> {
+    ) -> bool {
         let written_modules = match &output {
             ExecutionStatus::Success(output) | ExecutionStatus::SkipRest(output) => {
                 output.module_write_set()
             },
-            ExecutionStatus::Abort(_) => HashMap::new(),
+            ExecutionStatus::Abort(_)
+            | ExecutionStatus::DirectWriteSetTransactionNotCapableError
+            | ExecutionStatus::SpeculativeExecutionAbortError(_)
+            | ExecutionStatus::DelayedFieldsCodeInvariantError(_) => BTreeMap::new(),
         };
 
         if !self.module_read_write_intersection.load(Ordering::Relaxed) {
@@ -126,20 +133,14 @@ impl<T: Transaction, O: TransactionOutput<Txn = T>, E: Debug + Send + Clone>
             ) {
                 self.module_read_write_intersection
                     .store(true, Ordering::Release);
-                return Err(anyhow!(
-                    "[BlockSTM]: Detect module r/w intersection, will fallback to sequential execution"
-                ));
+                return false;
             }
         }
 
         self.inputs[txn_idx as usize].store(Some(Arc::new(input)));
         self.outputs[txn_idx as usize].store(Some(Arc::new(TxnOutput::from_output_status(output))));
 
-        Ok(())
-    }
-
-    pub(crate) fn module_publishing_may_race(&self) -> bool {
-        self.module_read_write_intersection.load(Ordering::Acquire)
+        true
     }
 
     pub(crate) fn read_set(&self, txn_idx: TxnIndex) -> Option<Arc<CapturedReads<T>>> {
@@ -161,14 +162,31 @@ impl<T: Transaction, O: TransactionOutput<Txn = T>, E: Debug + Send + Clone>
     }
 
     /// Does a transaction at txn_idx have SkipRest or Abort status.
-    pub(crate) fn block_truncated_at_idx(&self, txn_idx: TxnIndex) -> bool {
+    pub(crate) fn block_skips_rest_at_idx(&self, txn_idx: TxnIndex) -> bool {
         matches!(
             &self.outputs[txn_idx as usize]
                 .load_full()
                 .expect("[BlockSTM]: Execution output must be recorded after execution")
                 .output_status,
-            ExecutionStatus::SkipRest(_) | ExecutionStatus::Abort(_)
+            ExecutionStatus::SkipRest(_)
         )
+    }
+
+    pub(crate) fn execution_error(&self, txn_idx: TxnIndex) -> Option<Error<E>> {
+        if self.module_read_write_intersection.load(Ordering::Acquire) {
+            return Some(Error::FallbackToSequential(PanicOr::Or(
+                IntentionalFallbackToSequential::ModulePathReadWrite,
+            )));
+        }
+
+        if let ExecutionStatus::Abort(err) = &self.outputs[txn_idx as usize]
+            .load_full()
+            .expect("[BlockSTM]: Execution output must be recorded after execution")
+            .output_status
+        {
+            return Some(err.clone());
+        }
+        None
     }
 
     pub(crate) fn update_to_skip_rest(&self, txn_idx: TxnIndex) {
@@ -202,41 +220,92 @@ impl<T: Transaction, O: TransactionOutput<Txn = T>, E: Debug + Send + Clone>
                         .map(|k| (k, false))
                         .chain(t.module_write_set().into_keys().map(|k| (k, true))),
                 ),
-                ExecutionStatus::Abort(_) => None,
+                ExecutionStatus::Abort(_)
+                | ExecutionStatus::DirectWriteSetTransactionNotCapableError
+                | ExecutionStatus::SpeculativeExecutionAbortError(_)
+                | ExecutionStatus::DelayedFieldsCodeInvariantError(_) => None,
             })
     }
 
-    pub(crate) fn delta_keys(&self, txn_idx: TxnIndex) -> Vec<T::Key> {
+    pub(crate) fn resource_write_set(
+        &self,
+        txn_idx: TxnIndex,
+    ) -> Option<BTreeMap<T::Key, (T::Value, Option<Arc<MoveTypeLayout>>)>> {
+        self.outputs[txn_idx as usize]
+            .load_full()
+            .and_then(|txn_output| match &txn_output.output_status {
+                ExecutionStatus::Success(t) | ExecutionStatus::SkipRest(t) => {
+                    Some(t.resource_write_set())
+                },
+                ExecutionStatus::Abort(_)
+                | ExecutionStatus::DirectWriteSetTransactionNotCapableError
+                | ExecutionStatus::SpeculativeExecutionAbortError(_)
+                | ExecutionStatus::DelayedFieldsCodeInvariantError(_) => None,
+            })
+    }
+
+    pub(crate) fn delayed_field_keys(
+        &self,
+        txn_idx: TxnIndex,
+    ) -> Option<impl Iterator<Item = T::Identifier>> {
+        self.outputs[txn_idx as usize]
+            .load()
+            .as_ref()
+            .and_then(|txn_output| match &txn_output.output_status {
+                ExecutionStatus::Success(t) | ExecutionStatus::SkipRest(t) => {
+                    Some(t.delayed_field_change_set().into_keys())
+                },
+                ExecutionStatus::Abort(_)
+                | ExecutionStatus::DirectWriteSetTransactionNotCapableError
+                | ExecutionStatus::SpeculativeExecutionAbortError(_)
+                | ExecutionStatus::DelayedFieldsCodeInvariantError(_) => None,
+            })
+    }
+
+    pub(crate) fn aggregator_v1_delta_keys(&self, txn_idx: TxnIndex) -> Vec<T::Key> {
         self.outputs[txn_idx as usize].load().as_ref().map_or(
             vec![],
             |txn_output| match &txn_output.output_status {
                 ExecutionStatus::Success(t) | ExecutionStatus::SkipRest(t) => {
                     t.aggregator_v1_delta_set().into_keys().collect()
                 },
-                ExecutionStatus::Abort(_) => vec![],
+                ExecutionStatus::Abort(_)
+                | ExecutionStatus::DirectWriteSetTransactionNotCapableError
+                | ExecutionStatus::SpeculativeExecutionAbortError(_)
+                | ExecutionStatus::DelayedFieldsCodeInvariantError(_) => vec![],
             },
         )
     }
 
-    pub(crate) fn events(&self, txn_idx: TxnIndex) -> Box<dyn Iterator<Item = T::Event>> {
+    pub(crate) fn events(
+        &self,
+        txn_idx: TxnIndex,
+    ) -> Box<dyn Iterator<Item = (T::Event, Option<MoveTypeLayout>)>> {
         self.outputs[txn_idx as usize].load().as_ref().map_or(
-            Box::new(empty::<T::Event>()),
+            Box::new(empty::<(T::Event, Option<MoveTypeLayout>)>()),
             |txn_output| match &txn_output.output_status {
                 ExecutionStatus::Success(t) | ExecutionStatus::SkipRest(t) => {
                     let events = t.get_events();
                     Box::new(events.into_iter())
                 },
-                ExecutionStatus::Abort(_) => Box::new(empty::<T::Event>()),
+                ExecutionStatus::Abort(_)
+                | ExecutionStatus::DirectWriteSetTransactionNotCapableError
+                | ExecutionStatus::SpeculativeExecutionAbortError(_)
+                | ExecutionStatus::DelayedFieldsCodeInvariantError(_) => {
+                    Box::new(empty::<(T::Event, Option<MoveTypeLayout>)>())
+                },
             },
         )
     }
 
     // Called when a transaction is committed to record WriteOps for materialized aggregator values
     // corresponding to the (deltas) in the recorded final output of the transaction.
-    pub(crate) fn record_delta_writes(
+    pub(crate) fn record_materialized_txn_output(
         &self,
         txn_idx: TxnIndex,
         delta_writes: Vec<(T::Key, WriteOp)>,
+        patched_resource_write_set: BTreeMap<T::Key, T::Value>,
+        patched_events: Vec<T::Event>,
     ) {
         match &self.outputs[txn_idx as usize]
             .load_full()
@@ -244,9 +313,16 @@ impl<T: Transaction, O: TransactionOutput<Txn = T>, E: Debug + Send + Clone>
             .output_status
         {
             ExecutionStatus::Success(t) | ExecutionStatus::SkipRest(t) => {
-                t.incorporate_delta_writes(delta_writes);
+                t.incorporate_materialized_txn_output(
+                    delta_writes,
+                    patched_resource_write_set,
+                    patched_events,
+                );
             },
-            ExecutionStatus::Abort(_) => {},
+            ExecutionStatus::Abort(_)
+            | ExecutionStatus::DirectWriteSetTransactionNotCapableError
+            | ExecutionStatus::SpeculativeExecutionAbortError(_)
+            | ExecutionStatus::DelayedFieldsCodeInvariantError(_) => {},
         };
     }
 

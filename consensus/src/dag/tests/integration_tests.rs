@@ -7,6 +7,7 @@ use crate::{
     network::{IncomingDAGRequest, NetworkSender},
     network_interface::{ConsensusMsg, ConsensusNetworkClient, DIRECT_SEND, RPC},
     network_tests::{NetworkPlayground, TwinId},
+    payload_manager::PayloadManager,
     test_utils::{consensus_runtime, EmptyStateComputer, MockPayloadManager, MockStorage},
 };
 use aptos_channels::{aptos_channel, message_queues::QueueStyle};
@@ -71,6 +72,7 @@ impl DagBootstrapUnit {
         let network = Arc::new(network);
 
         let payload_client = Arc::new(MockPayloadManager::new(None));
+        let payload_manager = Arc::new(PayloadManager::DirectMempool);
 
         let state_computer = Arc::new(EmptyStateComputer {});
 
@@ -79,12 +81,12 @@ impl DagBootstrapUnit {
                 self_peer,
                 signer,
                 Arc::new(epoch_state),
-                storage.get_ledger_info(),
                 Arc::new(dag_storage),
                 network.clone(),
                 network.clone(),
                 network.clone(),
                 time_service,
+                payload_manager,
                 payload_client,
                 state_computer,
             );

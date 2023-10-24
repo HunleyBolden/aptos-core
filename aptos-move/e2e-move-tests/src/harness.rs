@@ -3,7 +3,6 @@
 
 use crate::{assert_success, AptosPackageHooks};
 use anyhow::Error;
-use aptos::move_tool::MemberId;
 use aptos_cached_packages::aptos_stdlib;
 use aptos_crypto::{ed25519::Ed25519PrivateKey, PrivateKey, Uniform};
 use aptos_framework::{natives::code::PackageMetadata, BuildOptions, BuiltPackage};
@@ -20,6 +19,7 @@ use aptos_types::{
     account_address::AccountAddress,
     account_config::{AccountResource, CoinStoreResource, CORE_CODE_ADDRESS},
     contract_event::ContractEvent,
+    move_utils::MemberId,
     on_chain_config::{FeatureFlag, GasScheduleV2, OnChainConfig},
     state_store::{
         state_key::StateKey,
@@ -791,6 +791,51 @@ macro_rules! assert_abort {
                 aptos_types::transaction::TransactionStatus::Keep(
                     aptos_types::transaction::ExecutionStatus::MoveAbort { code: $c, .. }
                 ),
+            ),
+            $($arg)+
+        );
+    }};
+}
+
+/// Helper to assert transaction aborts.
+#[macro_export]
+macro_rules! assert_abort_ref {
+    // identity needs to be before pattern (both with and without message),
+    // as if we pass variable - it matches the pattern arm, but value is not used, but overriden.
+    // Opposite order and test_asserts_variable_used / test_asserts_variable_used_with_message tests
+    // would fail
+    ($s:expr, $c:ident $(,)?) => {{
+        claims::assert_matches!(
+            $s,
+            &aptos_types::transaction::TransactionStatus::Keep(
+                aptos_types::transaction::ExecutionStatus::MoveAbort { code, .. }
+            )
+            if code == $c,
+        );
+    }};
+    ($s:expr, $c:pat $(,)?) => {{
+        claims::assert_matches!(
+            $s,
+            &aptos_types::transaction::TransactionStatus::Keep(
+                aptos_types::transaction::ExecutionStatus::MoveAbort { code: $c, .. }
+            )
+        );
+    }};
+    ($s:expr, $c:ident, $($arg:tt)+) => {{
+        claims::assert_matches!(
+            $s,
+            &aptos_types::transaction::TransactionStatus::Keep(
+                aptos_types::transaction::ExecutionStatus::MoveAbort { code, .. }
+            )
+            if code == $c,
+            $($arg)+
+        );
+    }};
+    ($s:expr, $c:pat, $($arg:tt)+) => {{
+        claims::assert_matches!(
+            $s,
+            &aptos_types::transaction::TransactionStatus::Keep(
+                aptos_types::transaction::ExecutionStatus::MoveAbort { code: $c, .. }
             ),
             $($arg)+
         );

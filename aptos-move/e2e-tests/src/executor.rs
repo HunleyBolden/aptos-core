@@ -37,10 +37,13 @@ use aptos_types::{
     chain_id::ChainId,
     contract_event::ContractEvent,
     on_chain_config::{
-        Features, OnChainConfig, TimedFeatureOverride, TimedFeatures, ValidatorSet, Version,
+        Features, OnChainConfig, TimedFeatureOverride, TimedFeaturesBuilder, ValidatorSet, Version,
     },
     state_store::{state_key::StateKey, state_value::StateValue},
     transaction::{
+        signature_verified_transaction::{
+            into_signature_verified_block, SignatureVerifiedTransaction,
+        },
         ExecutionStatus, SignedTransaction, Transaction, TransactionOutput, TransactionPayload,
         TransactionStatus, VMValidatorResult,
     },
@@ -73,6 +76,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
+
 static RNG_SEED: [u8; 32] = [9u8; 32];
 
 const ENV_TRACE_DIR: &str = "TRACE";
@@ -92,6 +96,14 @@ const POSTFIX: &str = "_should_error";
 /// Maps block number N to the index of the input and output transactions
 pub type TraceSeqMapping = (usize, Vec<usize>, Vec<usize>);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutorMode {
+    SequentialOnly,
+    ParallelOnly,
+    // Runs sequential, then parallel, and compares outputs.
+    BothComparison,
+}
+
 /// Provides an environment to run a VM instance.
 ///
 /// This struct is a mock in-memory implementation of the Aptos executor.
@@ -104,9 +116,10 @@ pub struct FakeExecutor {
     trace_dir: Option<PathBuf>,
     rng: KeyGen,
     /// If set, determines whether or not to execute a comparison test with the parallel
-    /// block executor. If not set, environment variable E2E_PARALLEL_EXEC must be set
-    /// s.t. the comparison test is executed.
-    no_parallel_exec: Option<bool>,
+    /// block executor.
+    /// If not set, environment variable E2E_PARALLEL_EXEC must be set
+    /// s.t. the comparison test is executed (BothComparison).
+    executor_mode: Option<ExecutorMode>,
     features: Features,
     chain_id: u8,
 }
@@ -133,7 +146,7 @@ impl FakeExecutor {
             executed_output: None,
             trace_dir: None,
             rng: KeyGen::from_seed(RNG_SEED),
-            no_parallel_exec: None,
+            executor_mode: None,
             features: Features::default(),
             chain_id: chain_id.id(),
         };
@@ -143,18 +156,21 @@ impl FakeExecutor {
         executor
     }
 
+    pub fn set_executor_mode(mut self, mode: ExecutorMode) -> Self {
+        self.executor_mode = Some(mode);
+        self
+    }
+
     /// Configure this executor to not use parallel execution. By default, parallel execution is
     /// enabled if E2E_PARALLEL_EXEC is set. This overrides the default.
-    pub fn set_not_parallel(mut self) -> Self {
-        self.no_parallel_exec = Some(true);
-        self
+    pub fn set_not_parallel(self) -> Self {
+        self.set_executor_mode(ExecutorMode::SequentialOnly)
     }
 
     /// Configure this executor to use parallel execution. By default, parallel execution is
     /// enabled if E2E_PARALLEL_EXEC is set. This overrides the default.
-    pub fn set_parallel(mut self) -> Self {
-        self.no_parallel_exec = Some(false);
-        self
+    pub fn set_parallel(self) -> Self {
+        self.set_executor_mode(ExecutorMode::BothComparison)
     }
 
     /// Creates an executor from the genesis file GENESIS_FILE_LOCATION
@@ -207,7 +223,7 @@ impl FakeExecutor {
             executed_output: None,
             trace_dir: None,
             rng: KeyGen::from_seed(RNG_SEED),
-            no_parallel_exec: None,
+            executor_mode: None,
             features: Features::default(),
             chain_id: ChainId::test().id(),
         }
@@ -446,7 +462,7 @@ impl FakeExecutor {
 
     pub fn execute_transaction_block_parallel(
         &self,
-        txn_block: Vec<Transaction>,
+        txn_block: &[SignatureVerifiedTransaction],
     ) -> Result<Vec<TransactionOutput>, VMStatus> {
         BlockAptosVM::execute_block::<_, NoOpTransactionCommitHook<AptosTransactionOutput, VMStatus>>(
             self.executor_thread_pool.clone(),
@@ -475,18 +491,56 @@ impl FakeExecutor {
             }
         }
 
-        let output = AptosVM::execute_block(txn_block.clone(), &self.data_store, None);
+        let sig_verified_block = into_signature_verified_block(txn_block);
 
-        let no_parallel = if let Some(no_parallel) = self.no_parallel_exec {
-            no_parallel
+        let mode = self.executor_mode.unwrap_or_else(|| {
+            if env::var(ENV_ENABLE_PARALLEL).is_ok() {
+                ExecutorMode::BothComparison
+            } else {
+                ExecutorMode::SequentialOnly
+            }
+        });
+
+        let sequential_output = if mode != ExecutorMode::ParallelOnly {
+            Some(AptosVM::execute_block(
+                &sig_verified_block,
+                &self.data_store,
+                None,
+            ))
         } else {
-            env::var(ENV_ENABLE_PARALLEL).is_err()
+            None
         };
 
-        if !no_parallel {
-            let parallel_output = self.execute_transaction_block_parallel(txn_block);
-            assert_eq!(output, parallel_output);
+        let parallel_output = if mode != ExecutorMode::SequentialOnly {
+            Some(self.execute_transaction_block_parallel(&sig_verified_block))
+        } else {
+            None
+        };
+
+        if mode == ExecutorMode::BothComparison {
+            let sequential_output = sequential_output.as_ref().unwrap();
+            let parallel_output = parallel_output.as_ref().unwrap();
+
+            // make more granular comparison, to be able to understand test failures better
+            if sequential_output.is_ok() && parallel_output.is_ok() {
+                let seq_txn_output = sequential_output.as_ref().unwrap();
+                let par_txn_output = parallel_output.as_ref().unwrap();
+                assert_eq!(seq_txn_output.len(), par_txn_output.len());
+                for (idx, (seq_output, par_output)) in
+                    seq_txn_output.iter().zip(par_txn_output.iter()).enumerate()
+                {
+                    assert_eq!(
+                        seq_output, par_output,
+                        "first transaction output mismatch at index {}",
+                        idx
+                    );
+                }
+            } else {
+                assert_eq!(sequential_output, parallel_output);
+            }
         }
+
+        let output = sequential_output.or(parallel_output).unwrap();
 
         if let Some(logger) = &self.executed_output {
             logger.log(format!("{:#?}\n", output).as_str());
@@ -714,8 +768,9 @@ impl FakeExecutor {
         iterations: u64,
     ) -> u128 {
         // FIXME: should probably read the timestamp from storage.
-        let timed_features =
-            TimedFeatures::enable_all().with_override_profile(TimedFeatureOverride::Testing);
+        let timed_features = TimedFeaturesBuilder::enable_all()
+            .with_override_profile(TimedFeatureOverride::Testing)
+            .build();
 
         let resolver = self.data_store.as_move_resolver();
 
@@ -787,8 +842,9 @@ impl FakeExecutor {
 
         let (write_set, _events) = {
             // FIXME: should probably read the timestamp from storage.
-            let timed_features =
-                TimedFeatures::enable_all().with_override_profile(TimedFeatureOverride::Testing);
+            let timed_features = TimedFeaturesBuilder::enable_all()
+                .with_override_profile(TimedFeatureOverride::Testing)
+                .build();
 
             let resolver = self.data_store.as_move_resolver();
 
@@ -833,7 +889,6 @@ impl FakeExecutor {
                     println!("Should error, but ignoring for now... {}", err);
                 }
             }
-
             let change_set = session
                 .finish(
                     &mut (),
@@ -864,8 +919,9 @@ impl FakeExecutor {
     ) {
         let (write_set, events) = {
             // FIXME: should probably read the timestamp from storage.
-            let timed_features =
-                TimedFeatures::enable_all().with_override_profile(TimedFeatureOverride::Testing);
+            let timed_features = TimedFeaturesBuilder::enable_all()
+                .with_override_profile(TimedFeatureOverride::Testing)
+                .build();
 
             let resolver = self.data_store.as_move_resolver();
 
@@ -939,7 +995,7 @@ impl FakeExecutor {
             self.chain_id,
             self.features.clone(),
             // FIXME: should probably read the timestamp from storage.
-            TimedFeatures::enable_all(),
+            TimedFeaturesBuilder::enable_all().build(),
             &resolver,
         )
         .unwrap();

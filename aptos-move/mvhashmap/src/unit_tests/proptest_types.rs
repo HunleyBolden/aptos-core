@@ -44,6 +44,7 @@ enum ExpectedOutput<V: Debug + Clone + PartialEq> {
     Failure,
 }
 
+#[derive(Debug, Clone)]
 struct Value<V> {
     maybe_value: Option<V>,
     maybe_bytes: Option<Bytes>,
@@ -74,6 +75,10 @@ impl<V: Into<Vec<u8>> + Clone> TransactionWrite for Value<V> {
 
     fn as_state_value(&self) -> Option<StateValue> {
         unimplemented!("Irrelevant for the test")
+    }
+
+    fn set_bytes(&mut self, bytes: Bytes) {
+        self.maybe_bytes = Some(bytes);
     }
 }
 
@@ -211,7 +216,7 @@ where
 
     let baseline = Baseline::new(transactions.as_slice(), test_group);
     // Only testing data, provide executable type ().
-    let map = MVHashMap::<KeyType<K>, usize, Value<V>, ExecutableTestType>::new();
+    let map = MVHashMap::<KeyType<K>, usize, Value<V>, ExecutableTestType, ()>::new();
 
     // make ESTIMATE placeholders for all versions to be updated.
     // allows to test that correct values appear at the end of concurrent execution.
@@ -233,7 +238,7 @@ where
                 .write(key.clone(), idx, 0, vec![(5, value)]);
             map.group_data().mark_estimate(&key, idx);
         } else {
-            map.data().write(key.clone(), idx, 0, value);
+            map.data().write(key.clone(), idx, 0, (value, None));
             map.data().mark_estimate(&key, idx);
         }
     }
@@ -274,7 +279,7 @@ where
                                     &5,
                                     idx as TxnIndex,
                                 ) {
-                                    Ok((_, v)) => {
+                                    Ok((_, v, _)) => {
                                         assert_value(v);
                                         break;
                                     },
@@ -290,7 +295,7 @@ where
                                     .data()
                                     .fetch_data(&KeyType(key.clone()), idx as TxnIndex)
                                 {
-                                    Ok(Versioned(_, v)) => {
+                                    Ok(Versioned(_, v, _)) => {
                                         assert_value(v);
                                         break;
                                     },
@@ -337,7 +342,7 @@ where
                             map.group_data()
                                 .write(key, idx as TxnIndex, 1, vec![(5, value)]);
                         } else {
-                            map.data().write(key, idx as TxnIndex, 1, value);
+                            map.data().write(key, idx as TxnIndex, 1, (value, None));
                         }
                     },
                     Operator::Insert(v) => {
@@ -347,7 +352,7 @@ where
                             map.group_data()
                                 .write(key, idx as TxnIndex, 1, vec![(5, value)]);
                         } else {
-                            map.data().write(key, idx as TxnIndex, 1, value);
+                            map.data().write(key, idx as TxnIndex, 1, (value, None));
                         }
                     },
                     Operator::Update(delta) => {

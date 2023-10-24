@@ -14,7 +14,6 @@ rust-version = { workspace = true }
 
 [dependencies]
 anyhow = { workspace = true }
-aptos = { workspace = true }
 aptos-block-executor = { workspace = true }
 aptos-cached-packages = { workspace = true }
 aptos-crypto = { workspace = true }
@@ -44,6 +43,10 @@ rand = { workspace = true }
 rstest = { workspace = true }
 serde = { workspace = true }
 tempfile = { workspace = true }
+
+[dev-dependencies]
+claims = { workspace = true }
+test-case = { workspace = true }
 
 [lib]
 doctest = false
