@@ -56,7 +56,7 @@ use crate::{
 use anyhow::{bail, ensure, Context};
 use aptos_bounded_executor::BoundedExecutor;
 use aptos_channels::{aptos_channel, message_queues::QueueStyle};
-use aptos_config::config::{ConsensusConfig, NodeConfig, SecureBackend};
+use aptos_config::config::{ConsensusConfig, DagConsensusConfig, NodeConfig, SecureBackend};
 use aptos_consensus_types::{
     common::{Author, Round},
     epoch_retrieval::EpochRetrievalRequest,
@@ -152,6 +152,7 @@ pub struct EpochManager<P: OnChainConfigProvider> {
     aptos_time_service: aptos_time_service::TimeService,
     dag_rpc_tx: Option<aptos_channel::Sender<AccountAddress, IncomingDAGRequest>>,
     dag_shutdown_tx: Option<oneshot::Sender<oneshot::Sender<()>>>,
+    dag_config: DagConsensusConfig,
 }
 
 impl<P: OnChainConfigProvider> EpochManager<P> {
@@ -171,6 +172,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
     ) -> Self {
         let author = node_config.validator_network.as_ref().unwrap().peer_id();
         let config = node_config.consensus.clone();
+        let dag_config = node_config.dag_consensus.clone();
         let sr_config = &node_config.consensus.safety_rules;
         let safety_rules_manager = SafetyRulesManager::new(sr_config);
         Self {
@@ -203,6 +205,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             dag_rpc_tx: None,
             dag_shutdown_tx: None,
             aptos_time_service,
+            dag_config,
         }
     }
 
@@ -285,7 +288,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
                     + onchain_config.max_failed_authors_to_store()
                     + PROPOSER_ROUND_BEHIND_STORAGE_BUFFER;
 
-                let backend = Box::new(AptosDBBackend::new(
+                let backend = Arc::new(AptosDBBackend::new(
                     window_size,
                     seek_len,
                     self.storage.aptos_db(),
@@ -1065,6 +1068,8 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
 
         let bootstrapper = DagBootstrapper::new(
             self.author,
+            self.dag_config.clone(),
+            onchain_dag_consensus_config.clone(),
             signer,
             Arc::new(epoch_state),
             dag_storage,

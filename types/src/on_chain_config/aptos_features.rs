@@ -46,6 +46,7 @@ pub enum FeatureFlag {
     AGGREGATOR_V2_DELAYED_FIELDS = 36,
     CONCURRENT_ASSETS = 37,
     LIMIT_MAX_IDENTIFIER_LENGTH = 38,
+    OPERATOR_BENEFICIARY_CHANGE = 39,
 }
 
 /// Representation of features on chain as a bitset.
@@ -58,7 +59,7 @@ pub struct Features {
 impl Default for Features {
     fn default() -> Self {
         Features {
-            features: vec![0b00100000, 0b00100000, 0b00001100, 0b01100000],
+            features: vec![0b00100000, 0b00100000, 0b00001100, 0b01100000, 0b00100000],
         }
     }
 }
