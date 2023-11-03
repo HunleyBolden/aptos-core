@@ -4,6 +4,8 @@ module aptos_framework::coin {
     use std::error;
     use std::option::{Self, Option};
     use std::signer;
+    use aptos_std::smart_table;
+    use aptos_std::smart_table::SmartTable;
 
     use aptos_framework::account;
     use aptos_framework::aggregator_factory;
@@ -13,6 +15,12 @@ module aptos_framework::coin {
     use aptos_framework::system_addresses;
 
     use aptos_std::type_info;
+    use aptos_std::type_info::{TypeInfo, type_of};
+    use aptos_framework::fungible_asset;
+    use aptos_framework::fungible_asset::{FungibleAsset, Metadata};
+    use aptos_framework::object;
+    use aptos_framework::object::address_to_object;
+    use aptos_framework::system_addresses::assert_aptos_framework;
 
     friend aptos_framework::aptos_coin;
     friend aptos_framework::genesis;
@@ -60,6 +68,27 @@ module aptos_framework::coin {
 
     /// The value of aggregatable coin used for transaction fees redistribution does not fit in u64.
     const EAGGREGATABLE_COIN_VALUE_TOO_LARGE: u64 = 14;
+
+    /// The coin and FA conversion map does not exist.
+    const ECOIN_FA_MAP_NOT_EXIST: u64 = 15;
+
+    /// The coin type does not exist as a key in the conversion map.
+    const ECOIN_TYPE_NOT_EXIST_IN_MAP: u64 = 16;
+
+    /// The fungible asset metadata does not exist as a key in the conversion map.
+    const EFA_METADATA_NOT_EXIST_IN_MAP: u64 = 17;
+
+    /// The coin type from the map does not match the calling function type argument.
+    const ECOIN_TYPE_MISMATCH: u64 = 18;
+
+    /// The coin name and FA name are not match.
+    const ECOIN_AND_FA_NAME_MISMATCH: u64 = 19;
+
+    /// The coin name and FA symbol are not match.
+    const ECOIN_AND_FA_SYMBOL_MISMATCH: u64 = 20;
+
+    /// The coin name and FA decimal are not match.
+    const ECOIN_AND_FA_DECIMAL_MISMATCH: u64 = 21;
 
     //
     // Constants
@@ -138,6 +167,108 @@ module aptos_framework::coin {
     /// Capability required to burn coins.
     struct BurnCapability<phantom CoinType> has copy, store {}
 
+    /// The mapping between coin and fa. It may not be symmetric since for most asset we only allow from coin to fa.
+    struct CoinConversionMap has key {
+        coin_to_fa: SmartTable<TypeInfo, address>,
+        fa_to_coin: SmartTable<address, TypeInfo>,
+    }
+
+    // Conversion from coin to fungible asset
+    public fun coin_to_fa<CoinType>(coin: Coin<CoinType>): FungibleAsset acquires CoinConversionMap, CoinInfo {
+        assert!(exists<CoinConversionMap>(@aptos_framework), error::not_found(ECOIN_FA_MAP_NOT_EXIST));
+        let map = borrow_global<CoinConversionMap>(@aptos_framework);
+        assert!(
+            smart_table::contains(&map.coin_to_fa, type_of<CoinType>()),
+            error::not_found(ECOIN_TYPE_NOT_EXIST_IN_MAP)
+        );
+        let fa_addr = *smart_table::borrow(&map.coin_to_fa, type_of<CoinType>());
+        let metadata = object::address_to_object<Metadata>(fa_addr);
+        let amount = burn_internal(coin);
+        fungible_asset::mint_internal(metadata, amount)
+    }
+
+    // Conversion from coin to fungible asset
+    public fun fa_to_coin<CoinType>(fa: FungibleAsset): Coin<CoinType> acquires CoinConversionMap, CoinInfo {
+        assert!(exists<CoinConversionMap>(@aptos_framework), error::not_found(ECOIN_FA_MAP_NOT_EXIST));
+        let map = borrow_global<CoinConversionMap>(@aptos_framework);
+        let metadata = object::object_address(&fungible_asset::metadata_from_asset(&fa));
+        let amount = fungible_asset::burn_internal(fa);
+        assert!(smart_table::contains(&map.fa_to_coin, metadata), error::not_found(EFA_METADATA_NOT_EXIST_IN_MAP));
+        let coin_type_info = *smart_table::borrow(&map.fa_to_coin, metadata);
+        assert!(coin_type_info == type_of<CoinType>(), error::invalid_argument(ECOIN_TYPE_MISMATCH));
+        mint_internal<CoinType>(amount)
+    }
+
+    // Used by goverance proposal to add coin/fa pair to the conversion map.
+    entry public fun add_to_coin_conversion_map<CoinType>(
+        aptos_framework: &signer,
+        fa_metadata: address,
+        allow_fa_to_coin: bool
+    ) acquires CoinConversionMap, CoinInfo {
+        assert_aptos_framework(aptos_framework);
+        if (!exists<CoinConversionMap>(@aptos_framework)) {
+            move_to(aptos_framework, CoinConversionMap {
+                coin_to_fa: smart_table::new<TypeInfo, address>(),
+                fa_to_coin: smart_table::new<address, TypeInfo>(),
+            })
+        };
+        // Verify the metadata is the same
+        let metadata = address_to_object<Metadata>(fa_metadata);
+        assert!(
+            name<CoinType>() == fungible_asset::name(metadata),
+            error::invalid_argument(ECOIN_AND_FA_NAME_MISMATCH)
+        );
+        assert!(
+            symbol<CoinType>() == fungible_asset::symbol(metadata),
+            error::invalid_argument(ECOIN_AND_FA_SYMBOL_MISMATCH)
+        );
+        assert!(
+            decimals<CoinType>() == fungible_asset::decimals(metadata),
+            error::invalid_argument(ECOIN_AND_FA_DECIMAL_MISMATCH)
+        );
+
+        let map = borrow_global_mut<CoinConversionMap>(@aptos_framework);
+        assert!(!smart_table::contains(&map.coin_to_fa, type_of<CoinType>()), ECOIN_TYPE_NOT_EXIST_IN_MAP);
+        smart_table::add(&mut map.coin_to_fa, type_of<CoinType>(), fa_metadata);
+        if (allow_fa_to_coin) {
+            assert!(
+                !smart_table::contains(&map.fa_to_coin, fa_metadata),
+                error::not_found(ECOIN_TYPE_NOT_EXIST_IN_MAP)
+            );
+            smart_table::add(&mut map.fa_to_coin, fa_metadata, type_of<CoinType>());
+        }
+    }
+
+    // Allow coin creator to add coin/fa pair to the conversion map.
+    entry public fun add_to_coin_conversion_map_by_creator<CoinType>(
+        coin_creator: &signer,
+        fa_metadata: address,
+    ) acquires CoinConversionMap, CoinInfo {
+        assert!(exists<CoinConversionMap>(@aptos_framework), error::not_found(ECOIN_FA_MAP_NOT_EXIST));
+        assert!(coin_address<CoinType>() == signer::address_of(coin_creator), );
+        // Verify the metadata is the same
+        let metadata = address_to_object<Metadata>(fa_metadata);
+        assert!(
+            name<CoinType>() == fungible_asset::name(metadata),
+            error::invalid_argument(ECOIN_AND_FA_NAME_MISMATCH)
+        );
+        assert!(
+            symbol<CoinType>() == fungible_asset::symbol(metadata),
+            error::invalid_argument(ECOIN_AND_FA_SYMBOL_MISMATCH)
+        );
+        assert!(
+            decimals<CoinType>() == fungible_asset::decimals(metadata),
+            error::invalid_argument(ECOIN_AND_FA_DECIMAL_MISMATCH)
+        );
+
+        let map = borrow_global_mut<CoinConversionMap>(@aptos_framework);
+        assert!(
+            !smart_table::contains(&map.coin_to_fa, type_of<CoinType>()),
+            error::not_found(ECOIN_TYPE_NOT_EXIST_IN_MAP)
+        );
+        smart_table::add(&mut map.coin_to_fa, type_of<CoinType>(), fa_metadata);
+    }
+
     //
     // Total supply config
     //
@@ -196,7 +327,10 @@ module aptos_framework::coin {
     }
 
     /// Merges `coin` into aggregatable coin (`dst_coin`).
-    public(friend) fun merge_aggregatable_coin<CoinType>(dst_coin: &mut AggregatableCoin<CoinType>, coin: Coin<CoinType>) {
+    public(friend) fun merge_aggregatable_coin<CoinType>(
+        dst_coin: &mut AggregatableCoin<CoinType>,
+        coin: Coin<CoinType>
+    ) {
         spec {
             update supply<CoinType> = supply<CoinType> - coin.value;
         };
@@ -253,8 +387,8 @@ module aptos_framework::coin {
     #[view]
     /// Returns `true` is account_addr has frozen the CoinStore or if it's not registered at all
     public fun is_coin_store_frozen<CoinType>(account_addr: address): bool acquires CoinStore {
-        if(!is_account_registered<CoinType>(account_addr)) {
-          return true
+        if (!is_account_registered<CoinType>(account_addr)) {
+            return true
         };
 
         let coin_store = borrow_global<CoinStore<CoinType>>(account_addr);
@@ -311,17 +445,7 @@ module aptos_framework::coin {
         coin: Coin<CoinType>,
         _cap: &BurnCapability<CoinType>,
     ) acquires CoinInfo {
-        spec {
-            update supply<CoinType> = supply<CoinType> - coin.value;
-        };
-        let Coin { value: amount } = coin;
-        assert!(amount > 0, error::invalid_argument(EZERO_COIN_AMOUNT));
-
-        let maybe_supply = &mut borrow_global_mut<CoinInfo<CoinType>>(coin_address<CoinType>()).supply;
-        if (option::is_some(maybe_supply)) {
-            let supply = option::borrow_mut(maybe_supply);
-            optional_aggregator::sub(supply, (amount as u128));
-        }
+        burn_internal(coin)
     }
 
     /// Burn `coin` from the specified `account` with capability.
@@ -515,7 +639,11 @@ module aptos_framework::coin {
             name,
             symbol,
             decimals,
-            supply: if (monitor_supply) { option::some(optional_aggregator::new(MAX_U128, parallelizable)) } else { option::none() },
+            supply: if (monitor_supply) {
+                option::some(
+                    optional_aggregator::new(MAX_U128, parallelizable)
+                )
+            } else { option::none() },
         };
         move_to(account, coin_info);
 
@@ -545,29 +673,7 @@ module aptos_framework::coin {
         amount: u64,
         _cap: &MintCapability<CoinType>,
     ): Coin<CoinType> acquires CoinInfo {
-        if (amount == 0) {
-            return Coin<CoinType> {
-                value: 0
-            }
-        };
-
-        let maybe_supply = &mut borrow_global_mut<CoinInfo<CoinType>>(coin_address<CoinType>()).supply;
-        if (option::is_some(maybe_supply)) {
-            let supply = option::borrow_mut(maybe_supply);
-            spec {
-                use aptos_framework::optional_aggregator;
-                use aptos_framework::aggregator;
-                assume optional_aggregator::is_parallelizable(supply) ==> (aggregator::spec_aggregator_get_val(option::borrow(supply.aggregator))
-                    + amount <= aggregator::spec_get_limit(option::borrow(supply.aggregator)));
-                assume !optional_aggregator::is_parallelizable(supply) ==>
-                    (option::borrow(supply.integer).value + amount <= option::borrow(supply.integer).limit);
-            };
-            optional_aggregator::add(supply, (amount as u128));
-        };
-        spec {
-            update supply<CoinType> = supply<CoinType> + amount;
-        };
-        Coin<CoinType> { value: amount }
+        mint_internal<CoinType>(amount)
     }
 
     public fun register<CoinType>(account: &signer) {
@@ -650,6 +756,49 @@ module aptos_framework::coin {
     /// Destroy a burn capability.
     public fun destroy_burn_cap<CoinType>(burn_cap: BurnCapability<CoinType>) {
         let BurnCapability<CoinType> {} = burn_cap;
+    }
+
+    inline fun mint_internal<CoinType>(amount: u64): Coin<CoinType> {
+        if (amount == 0) {
+            return Coin<CoinType> {
+                value: 0
+            }
+        };
+
+        let maybe_supply = &mut borrow_global_mut<CoinInfo<CoinType>>(coin_address<CoinType>()).supply;
+        if (option::is_some(maybe_supply)) {
+            let supply = option::borrow_mut(maybe_supply);
+            spec {
+                use aptos_framework::optional_aggregator;
+                use aptos_framework::aggregator;
+                assume optional_aggregator::is_parallelizable(supply) ==> (aggregator::spec_aggregator_get_val(
+                    option::borrow(supply.aggregator)
+                )
+                    + amount <= aggregator::spec_get_limit(option::borrow(supply.aggregator)));
+                assume !optional_aggregator::is_parallelizable(supply) ==>
+                    (option::borrow(supply.integer).value + amount <= option::borrow(supply.integer).limit);
+            };
+            optional_aggregator::add(supply, (amount as u128));
+        };
+        spec {
+            update supply<CoinType> = supply<CoinType> + amount;
+        };
+        Coin<CoinType> { value: amount }
+    }
+
+    inline fun burn_internal<CoinType>(coin: Coin<CoinType>): u64 {
+        spec {
+            update supply<CoinType> = supply<CoinType> - coin.value;
+        };
+        let Coin { value: amount } = coin;
+        assert!(amount > 0, error::invalid_argument(EZERO_COIN_AMOUNT));
+
+        let maybe_supply = &mut borrow_global_mut<CoinInfo<CoinType>>(coin_address<CoinType>()).supply;
+        if (option::is_some(maybe_supply)) {
+            let supply = option::borrow_mut(maybe_supply);
+            optional_aggregator::sub(supply, (amount as u128));
+        };
+        amount
     }
 
     #[test_only]

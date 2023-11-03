@@ -12,6 +12,8 @@ module aptos_framework::fungible_asset {
     use std::signer;
     use std::string::String;
 
+    friend aptos_framework::coin;
+
     /// Amount cannot be zero.
     const EAMOUNT_CANNOT_BE_ZERO: u64 = 1;
     /// The transfer ref and the fungible asset do not match.
@@ -68,6 +70,7 @@ module aptos_framework::fungible_asset {
 
     /// Maximum possible coin supply.
     const MAX_U128: u128 = 340282366920938463463374607431768211455;
+
 
     #[resource_group_member(group = aptos_framework::object::ObjectGroup)]
     struct Supply has key {
@@ -416,8 +419,15 @@ module aptos_framework::fungible_asset {
     public fun mint(ref: &MintRef, amount: u64): FungibleAsset acquires Supply, ConcurrentSupply {
         assert!(amount > 0, error::invalid_argument(EAMOUNT_CANNOT_BE_ZERO));
         let metadata = ref.metadata;
-        increase_supply(&metadata, amount);
+        mint_internal(metadata, amount)
+    }
 
+    /// CAN ONLY BE CALLED BY coin.move for migration.
+    public(friend) fun mint_internal(
+        metadata: Object<Metadata>,
+        amount: u64
+    ): FungibleAsset acquires Supply, ConcurrentSupply {
+        increase_supply(&metadata, amount);
         FungibleAsset {
             metadata,
             amount
@@ -449,12 +459,23 @@ module aptos_framework::fungible_asset {
 
     /// Burns a fungible asset
     public fun burn(ref: &BurnRef, fa: FungibleAsset) acquires Supply, ConcurrentSupply {
+        assert!(
+            ref.metadata == metadata_from_asset(&fa),
+            error::invalid_argument(EBURN_REF_AND_FUNGIBLE_ASSET_MISMATCH)
+        );
+        burn_internal(fa);
+    }
+
+    /// CAN ONLY BE CALLED BY coin.move for migration.
+    public(friend) fun burn_internal(
+        fa: FungibleAsset
+    ): u64 acquires Supply, ConcurrentSupply {
         let FungibleAsset {
             metadata,
-            amount,
+            amount
         } = fa;
-        assert!(ref.metadata == metadata, error::invalid_argument(EBURN_REF_AND_FUNGIBLE_ASSET_MISMATCH));
         decrease_supply(&metadata, amount);
+        amount
     }
 
     /// Burn the `amount` of the fungible asset from the given store.
@@ -861,7 +882,10 @@ module aptos_framework::fungible_asset {
     }
 
     #[test(fx = @aptos_framework, creator = @0xcafe)]
-    fun test_fungible_asset_upgrade(fx: &signer, creator: &signer) acquires Supply, ConcurrentSupply, FungibleAssetEvents, FungibleStore {
+    fun test_fungible_asset_upgrade(
+        fx: &signer,
+        creator: &signer
+    ) acquires Supply, ConcurrentSupply, FungibleAssetEvents, FungibleStore {
         let feature = features::get_concurrent_assets_feature();
         features::change_feature_flags(fx, vector[], vector[feature]);
 
