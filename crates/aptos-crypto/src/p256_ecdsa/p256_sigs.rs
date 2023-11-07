@@ -10,7 +10,7 @@ use crate::{
     traits::*,
 };
 use anyhow::{anyhow, Result};
-use aptos_crypto_derive::{DeserializeKey, SerializeKey};
+use aptos_crypto_derive::{key_name, DeserializeKey, SerializeKey};
 use core::convert::TryFrom;
 use p256::NonZeroScalar;
 use serde::Serialize;
@@ -19,6 +19,7 @@ use std::{cmp::Ordering, fmt};
 
 /// A P256 signature
 #[derive(DeserializeKey, Clone, SerializeKey)]
+#[key_name("P256EcdsaSignature")]
 pub struct P256Signature(pub(crate) p256::ecdsa::Signature);
 
 impl P256Signature {
@@ -95,6 +96,15 @@ impl P256Signature {
         let new_s_nonzero = NonZeroScalar::new(new_s).unwrap();
         let new_sig = p256::ecdsa::Signature::from_scalars(r, new_s_nonzero).unwrap();
         P256Signature(new_sig)
+    }
+
+    /// If signature bytes are serialized correctly, this function will return a canonical signature
+    /// that passes malleability checks.
+    pub fn make_canonical_from_bytes_unchecked(
+        bytes: &[u8],
+    ) -> Result<P256Signature, CryptoMaterialError> {
+        let signature = P256Signature::from_bytes_unchecked(bytes)?;
+        Ok(P256Signature::make_canonical(&signature))
     }
 }
 

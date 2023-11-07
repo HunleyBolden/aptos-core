@@ -10,7 +10,7 @@ use crate::{
     p256_ecdsa::{P256Signature, ORDER, P256_PRIVATE_KEY_LENGTH, P256_PUBLIC_KEY_LENGTH},
     traits::*,
 };
-use aptos_crypto_derive::{DeserializeKey, SerializeKey, SilentDebug, SilentDisplay};
+use aptos_crypto_derive::{key_name, DeserializeKey, SerializeKey, SilentDebug, SilentDisplay};
 use core::convert::TryFrom;
 use num_bigint::BigUint;
 use num_integer::Integer;
@@ -22,6 +22,7 @@ use std::fmt;
 
 /// A P256 private key
 #[derive(DeserializeKey, SerializeKey, SilentDebug, SilentDisplay)]
+#[key_name("P256EcdsaPrivateKey")]
 pub struct P256PrivateKey(pub(crate) p256::ecdsa::SigningKey);
 
 #[cfg(feature = "assert-private-keys-not-cloneable")]
@@ -37,6 +38,7 @@ impl Clone for P256PrivateKey {
 
 /// A P256 public key
 #[derive(DeserializeKey, Clone, SerializeKey)]
+#[key_name("P256EcdsaPublicKey")]
 pub struct P256PublicKey(pub(crate) p256::ecdsa::VerifyingKey);
 
 impl P256PrivateKey {
