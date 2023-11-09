@@ -92,6 +92,7 @@ pub enum FeatureFlag {
     OperatorBeneficiaryChange,
     VMBinaryFormatV7,
     ResourceGroupsChargeAsSizeSum,
+    WebAuthnSignature,
 }
 
 fn generate_features_blob(writer: &CodeWriter, data: &[u64]) {
@@ -240,6 +241,7 @@ impl From<FeatureFlag> for AptosFeatureFlag {
             FeatureFlag::ResourceGroupsChargeAsSizeSum => {
                 AptosFeatureFlag::RESOURCE_GROUPS_CHARGE_AS_SIZE_SUM
             },
+            FeatureFlag::WebAuthnSignature => AptosFeatureFlag::WEBAUTHN_SIGNATURE,
         }
     }
 }
@@ -311,6 +313,7 @@ impl From<AptosFeatureFlag> for FeatureFlag {
             AptosFeatureFlag::RESOURCE_GROUPS_CHARGE_AS_SIZE_SUM => {
                 FeatureFlag::ResourceGroupsChargeAsSizeSum
             },
+            AptosFeatureFlag::WEBAUTHN_SIGNATURE => FeatureFlag::WebAuthnSignature,
         }
     }
 }

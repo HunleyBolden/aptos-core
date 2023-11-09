@@ -34,6 +34,7 @@ use aptos_types::{
     fee_statement::FeeStatement,
     on_chain_config::{new_epoch_event_key, FeatureFlag, TimedFeatureOverride},
     transaction::{
+        authenticator::{AccountAuthenticator, AnySignature},
         signature_verified_transaction::SignatureVerifiedTransaction,
         EntryFunction, ExecutionError, ExecutionStatus, ModuleBundle, Multisig,
         MultisigTransactionPayload, SignatureCheckedTransaction, SignedTransaction,
@@ -1863,6 +1864,38 @@ impl VMValidator for AptosVM {
         {
             if let aptos_types::transaction::authenticator::TransactionAuthenticator::SingleSender{ .. } = transaction.authenticator_ref() {
                 return VMValidatorResult::error(StatusCode::FEATURE_UNDER_GATING);
+            }
+        }
+
+        if !self
+            .vm_impl
+            .get_features()
+            .is_enabled(FeatureFlag::WEBAUTHN_SIGNATURE)
+        {
+            let is_webauthn_signature = |signature: &AnySignature| -> bool {
+                if let AnySignature::WebAuthn { .. } = signature {
+                    return true;
+                }
+                false
+            };
+
+            let sender = transaction.authenticator_ref().sender();
+            match sender {
+                AccountAuthenticator::SingleKey { authenticator } => {
+                    let signature = authenticator.signature();
+                    if is_webauthn_signature(signature) {
+                        return VMValidatorResult::error(StatusCode::FEATURE_UNDER_GATING);
+                    }
+                },
+                AccountAuthenticator::MultiKey { authenticator } => {
+                    let signatures = authenticator.signatures();
+                    for (.., signature) in signatures {
+                        if is_webauthn_signature(&signature) {
+                            return VMValidatorResult::error(StatusCode::FEATURE_UNDER_GATING);
+                        }
+                    }
+                },
+                _ => {},
             }
         }
 
