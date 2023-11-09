@@ -13421,13 +13421,17 @@
           },
           {
             "$ref": "#/components/schemas/PublicKey_string(HexEncodedBytes)"
+          },
+          {
+            "$ref": "#/components/schemas/PublicKey_string(HexEncodedBytes)"
           }
         ],
         "discriminator": {
           "propertyName": "type",
           "mapping": {
             "ed25519": "#/components/schemas/PublicKey_string(HexEncodedBytes)",
-            "secp256k1_ecdsa": "#/components/schemas/PublicKey_string(HexEncodedBytes)"
+            "secp256k1_ecdsa": "#/components/schemas/PublicKey_string(HexEncodedBytes)",
+            "p256_ecdsa": "#/components/schemas/PublicKey_string(HexEncodedBytes)"
           }
         }
       },
@@ -13441,7 +13445,7 @@
             "properties": {
               "type": {
                 "type": "string",
-                "example": "secp256k1_ecdsa"
+                "example": "p256_ecdsa"
               }
             }
           },
@@ -13518,13 +13522,17 @@
           },
           {
             "$ref": "#/components/schemas/Signature_string(HexEncodedBytes)"
+          },
+          {
+            "$ref": "#/components/schemas/Signature_string(HexEncodedBytes)"
           }
         ],
         "discriminator": {
           "propertyName": "type",
           "mapping": {
             "ed25519": "#/components/schemas/Signature_string(HexEncodedBytes)",
-            "secp256k1_ecdsa": "#/components/schemas/Signature_string(HexEncodedBytes)"
+            "secp256k1_ecdsa": "#/components/schemas/Signature_string(HexEncodedBytes)",
+            "web_authn": "#/components/schemas/Signature_string(HexEncodedBytes)"
           }
         }
       },
@@ -13538,7 +13546,7 @@
             "properties": {
               "type": {
                 "type": "string",
-                "example": "secp256k1_ecdsa"
+                "example": "web_authn"
               }
             }
           },
