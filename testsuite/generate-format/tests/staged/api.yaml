@@ -59,6 +59,11 @@ AnyPublicKey:
         STRUCT:
           - public_key:
               TYPENAME: Secp256k1EcdsaPublicKey
+    2:
+      P256Ecdsa:
+        STRUCT:
+          - public_key:
+              TYPENAME: P256EcdsaPublicKey
 AnySignature:
   ENUM:
     0:
@@ -71,6 +76,24 @@ AnySignature:
         STRUCT:
           - signature:
               TYPENAME: Secp256k1EcdsaSignature
+    2:
+      WebAuthn:
+        STRUCT:
+          - partial_authenticator_assertion_response:
+              TYPENAME: PartialAuthenticatorAssertionResponse
+PartialAuthenticatorAssertionResponse:
+  STRUCT:
+    - signature:
+        TYPENAME: WebAuthnSignature
+    - authenticator_data: BYTES
+    - client_data_json: BYTES
+WebAuthnSignature:
+  ENUM:
+    0:
+      P256Ecdsa:
+        STRUCT:
+          - signature:
+              TYPENAME: P256EcdsaSignature
 BitVec:
   STRUCT:
     - inner: BYTES
@@ -274,6 +297,12 @@ Secp256k1EcdsaPrivateKey:
 Secp256k1EcdsaPublicKey:
   NEWTYPESTRUCT: BYTES
 Secp256k1EcdsaSignature:
+  NEWTYPESTRUCT: BYTES
+P256EcdsaPrivateKey:
+  NEWTYPESTRUCT: BYTES
+P256EcdsaPublicKey:
+  NEWTYPESTRUCT: BYTES
+P256EcdsaSignature:
   NEWTYPESTRUCT: BYTES
 SignedTransaction:
   STRUCT:

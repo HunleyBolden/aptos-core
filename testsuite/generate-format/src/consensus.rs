@@ -6,7 +6,7 @@ use aptos_crypto::{
     bls12381,
     ed25519::Ed25519PrivateKey,
     multi_ed25519::{MultiEd25519PublicKey, MultiEd25519Signature},
-    secp256k1_ecdsa,
+    p256_ecdsa, secp256k1_ecdsa,
     traits::{SigningKey, Uniform},
     PrivateKey,
 };
@@ -55,6 +55,14 @@ fn trace_crypto_values(tracer: &mut Tracer, samples: &mut Samples) -> Result<()>
     tracer.trace_value(samples, &secp256k1_private_key)?;
     tracer.trace_value(samples, &secp256k1_public_key)?;
     tracer.trace_value(samples, &secp256k1_signature)?;
+
+    let p256_ecdsa_private_key = p256_ecdsa::PrivateKey::generate(&mut rng);
+    let p256_ecdsa_public_key = PrivateKey::public_key(&p256_ecdsa_private_key);
+    let p256_ecdsa_signature = p256_ecdsa_private_key.sign(&message).unwrap();
+    tracer.trace_value(samples, &p256_ecdsa_private_key)?;
+    tracer.trace_value(samples, &p256_ecdsa_public_key)?;
+    tracer.trace_value(samples, &p256_ecdsa_signature)?;
+
     Ok(())
 }
 
