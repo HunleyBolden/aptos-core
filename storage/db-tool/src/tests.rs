@@ -287,6 +287,7 @@ mod dbtool_tests {
         old_db_dir: PathBuf,
         new_db_dir: PathBuf,
         force_sharding: bool,
+        skip_restore: bool,
     ) -> (Runtime, String) {
         use aptos_db::utils::iterators::PrefixedStateValueIterator;
         use itertools::zip_eq;
@@ -427,84 +428,86 @@ mod dbtool_tests {
         )
         .unwrap();
 
-        let start_string = format!("{}", start);
-        let end_string = format!("{}", end);
-        let mut restore_args = vec![
-            "aptos-db-tool".to_string(),
-            "restore".to_string(),
-            "bootstrap-db".to_string(),
-            "--ledger-history-start-version".to_string(),
-            start_string, // use start_string here
-            "--target-version".to_string(),
-            end_string, // use end_string here
-            "--target-db-dir".to_string(),
-            new_db_dir.as_path().to_str().unwrap().to_string(),
-            "--local-fs-dir".to_string(),
-            backup_dir.as_path().to_str().unwrap().to_string(),
-        ];
-        if force_sharding {
-            let additional_args = vec!["--enable-storage-sharding"]
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<String>>();
-            restore_args.extend(additional_args);
-        }
-        rt.block_on(DBTool::try_parse_from(restore_args).unwrap().run())
-            .unwrap();
-
-        // verify the new DB has the same data as the original DB
-        let db_config = if !force_sharding {
-            RocksdbConfigs::default()
-        } else {
-            RocksdbConfigs {
-                enable_storage_sharding: true,
-                ..Default::default()
+        if !skip_restore {
+            let start_string = format!("{}", start);
+            let end_string = format!("{}", end);
+            let mut restore_args = vec![
+                "aptos-db-tool".to_string(),
+                "restore".to_string(),
+                "bootstrap-db".to_string(),
+                "--ledger-history-start-version".to_string(),
+                start_string, // use start_string here
+                "--target-version".to_string(),
+                end_string, // use end_string here
+                "--target-db-dir".to_string(),
+                new_db_dir.as_path().to_str().unwrap().to_string(),
+                "--local-fs-dir".to_string(),
+                backup_dir.as_path().to_str().unwrap().to_string(),
+            ];
+            if force_sharding {
+                let additional_args = vec!["--enable-storage-sharding"]
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<String>>();
+                restore_args.extend(additional_args);
             }
-        };
-        let (_ledger_db, tree_db, state_kv_db) =
-            AptosDB::open_dbs(&StorageDirPaths::from_path(new_db_dir), db_config, false, 0)
+            rt.block_on(DBTool::try_parse_from(restore_args).unwrap().run())
                 .unwrap();
 
-        // assert the kv are the same in db and new_db
-        // current all the kv are still stored in the ledger db
-        //
-        for ver in start..=end {
-            let new_iter = PrefixedStateValueIterator::new(
-                &state_kv_db,
-                StateKeyPrefix::new(AccessPath, b"".to_vec()),
-                None,
-                ver,
-                force_sharding,
-            )
-            .unwrap();
-            let old_iter = db
-                .deref()
-                .get_prefixed_state_value_iterator(
-                    &StateKeyPrefix::new(AccessPath, b"".to_vec()),
+            // verify the new DB has the same data as the original DB
+            let db_config = if !force_sharding {
+                RocksdbConfigs::default()
+            } else {
+                RocksdbConfigs {
+                    enable_storage_sharding: true,
+                    ..Default::default()
+                }
+            };
+            let (_ledger_db, tree_db, state_kv_db) =
+                AptosDB::open_dbs(&StorageDirPaths::from_path(new_db_dir), db_config, false, 0)
+                    .unwrap();
+
+            // assert the kv are the same in db and new_db
+            // current all the kv are still stored in the ledger db
+            //
+            for ver in start..=end {
+                let new_iter = PrefixedStateValueIterator::new(
+                    &state_kv_db,
+                    StateKeyPrefix::new(AccessPath, b"".to_vec()),
                     None,
                     ver,
+                    force_sharding,
                 )
                 .unwrap();
+                let old_iter = db
+                    .deref()
+                    .get_prefixed_state_value_iterator(
+                        &StateKeyPrefix::new(AccessPath, b"".to_vec()),
+                        None,
+                        ver,
+                    )
+                    .unwrap();
 
-            zip_eq(new_iter, old_iter).for_each(|(new, old)| {
-                let (new_key, new_value) = new.unwrap();
-                let (old_key, old_value) = old.unwrap();
-                assert_eq!(new_key, old_key);
-                assert_eq!(new_value, old_value);
-            });
+                zip_eq(new_iter, old_iter).for_each(|(new, old)| {
+                    let (new_key, new_value) = new.unwrap();
+                    let (old_key, old_value) = old.unwrap();
+                    assert_eq!(new_key, old_key);
+                    assert_eq!(new_value, old_value);
+                });
+            }
+            // first snapshot tree not recovered
+            assert!(
+                tree_db.get_root_hash(0).is_err() || tree_db.get_leaf_count(0).unwrap() == 0,
+                "tree at version 0 should not be restored"
+            );
+            // second snapshot tree recovered
+            let second_snapshot_version: Version = 13;
+            assert!(
+                tree_db.get_root_hash(second_snapshot_version).is_ok(),
+                "root hash at version {} doesn't exist",
+                second_snapshot_version,
+            );
         }
-        // first snapshot tree not recovered
-        assert!(
-            tree_db.get_root_hash(0).is_err() || tree_db.get_leaf_count(0).unwrap() == 0,
-            "tree at version 0 should not be restored"
-        );
-        // second snapshot tree recovered
-        let second_snapshot_version: Version = 13;
-        assert!(
-            tree_db.get_root_hash(second_snapshot_version).is_ok(),
-            "root hash at version {} doesn't exist",
-            second_snapshot_version,
-        );
         (rt, server_addr)
     }
     #[test]
@@ -520,6 +523,7 @@ mod dbtool_tests {
             PathBuf::from(backup_dir.path()),
             PathBuf::from(old_db_dir.path()),
             PathBuf::from(new_db_dir.path()),
+            false,
             false,
         );
         let backup_size = dir_size(backup_dir.path());
@@ -546,6 +550,7 @@ mod dbtool_tests {
             PathBuf::from(old_db_dir.path()),
             PathBuf::from(new_db_dir.path()),
             false,
+            false,
         );
         rt.shutdown_timeout(Duration::from_secs(1));
     }
@@ -565,6 +570,7 @@ mod dbtool_tests {
             PathBuf::from(old_db_dir.path()),
             PathBuf::from(new_db_dir.path()),
             false,
+            false,
         );
         // boostrap a historical DB starting from version 1 to version 18
         // This only replays the txn from txn 17 to 18
@@ -577,6 +583,64 @@ mod dbtool_tests {
                 "1",
                 "--target-version",
                 "18",
+                "--target-db-dir",
+                new_db_dir.path().to_str().unwrap(),
+                "--local-fs-dir",
+                backup_dir.path().to_str().unwrap(),
+            ])
+            .unwrap()
+            .run(),
+        )
+        .unwrap();
+        rt.shutdown_timeout(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_resume_replay_verify_from_replay_phase() {
+        let backup_dir = TempPath::new();
+        backup_dir.create_as_dir().unwrap();
+        let new_db_dir = TempPath::new();
+        new_db_dir.create_as_dir().unwrap();
+        let old_db_dir = TempPath::new();
+        let (rt, _) = db_restore_test_setup(
+            0,
+            0,
+            PathBuf::from(backup_dir.path()),
+            PathBuf::from(old_db_dir.path()),
+            PathBuf::from(new_db_dir.path()),
+            false,
+            true,
+        );
+        // boostrap a historical DB starting from version 1 to version 18
+        // This only replays the txn from txn 17 to 18
+        rt.block_on(
+            DBTool::try_parse_from([
+                "aptos-db-tool",
+                "replay-verify",
+                "--start-version",
+                "1",
+                "--end-version",
+                "17",
+                "--target-db-dir",
+                new_db_dir.path().to_str().unwrap(),
+                "--local-fs-dir",
+                backup_dir.path().to_str().unwrap(),
+            ])
+            .unwrap()
+            .run(),
+        )
+        .unwrap();
+
+        // boostrap a historical DB starting from version 1 to version 18
+        // This only replays the txn from txn 17 to 18
+        rt.block_on(
+            DBTool::try_parse_from([
+                "aptos-db-tool",
+                "replay-verify",
+                "--start-version",
+                "18",
+                "--end-version",
+                "19",
                 "--target-db-dir",
                 new_db_dir.path().to_str().unwrap(),
                 "--local-fs-dir",
@@ -605,6 +669,7 @@ mod dbtool_tests {
             PathBuf::from(old_db_dir.path()),
             PathBuf::from(new_db_dir.path()),
             true,
+            false,
         );
         let backup_size = dir_size(backup_dir.path());
         let db_size = dir_size(new_db_dir.path());
