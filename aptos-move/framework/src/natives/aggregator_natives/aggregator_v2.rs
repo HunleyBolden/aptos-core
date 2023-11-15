@@ -47,14 +47,14 @@ pub const EAGGREGATOR_API_NOT_ENABLED: u64 = 0x03_0006;
 /// The generic type supplied to the aggregators is not supported.
 pub const EUNSUPPORTED_AGGREGATOR_TYPE: u64 = 0x03_0007;
 
-/// Arguments passed to concat exceed max limit of 256 bytes (for prefix and suffix together).
-pub const ECONCAT_STRING_LENGTH_TOO_LARGE: u64 = 0x03_0008;
+/// Arguments passed to concat or create_snapshot exceed max limit of 256 bytes (for prefix and suffix together).
+pub const EINPUT_STRING_LENGTH_TOO_LARGE: u64 = 0x03_0008;
 
 /// The native aggregator function, that is in the move file, is not yet supported.
 /// and any calls will raise this error.
 pub const EAGGREGATOR_FUNCTION_NOT_YET_SUPPORTED: u64 = 0x03_0009;
 
-pub const CONCAT_PREFIX_AND_SUFFIX_MAX_LENGTH: usize = 256;
+pub const STRING_SNAPSHOT_INPUT_MAX_LENGTH: usize = 256;
 
 /// Checks if the type argument `type_arg` is a string type.
 fn is_string_type(context: &SafeNativeContext, type_arg: &Type) -> SafeNativeResult<bool> {
@@ -443,6 +443,15 @@ fn native_create_snapshot(
     let snapshot_type = SnapshotType::from_ty_arg(context, &ty_args[0])?;
     let input = snapshot_type.pop_snapshot_value_by_type(&mut args)?;
 
+    if let SnapshotValue::String(v) = &input {
+        if v.len() > STRING_SNAPSHOT_INPUT_MAX_LENGTH {
+            return Err(SafeNativeError::Abort {
+                abort_code: EINPUT_STRING_LENGTH_TOO_LARGE,
+            });
+        }
+        context.charge(AGGREGATOR_V2_CREATE_SNAPSHOT_PER_BYTE * NumBytes::new(v.len() as u64))?;
+    }
+
     let result_value = if let Some((resolver, mut delayed_field_data)) = get_context_data(context) {
         let snapshot_id = delayed_field_data.create_new_snapshot(input, resolver);
         SnapshotValue::Integer(snapshot_id.as_u64() as u128)
@@ -562,14 +571,16 @@ fn native_string_concat(
     if prefix
         .len()
         .checked_add(suffix.len())
-        .map_or(false, |v| v > CONCAT_PREFIX_AND_SUFFIX_MAX_LENGTH)
+        .map_or(false, |v| v > STRING_SNAPSHOT_INPUT_MAX_LENGTH)
     {
         return Err(SafeNativeError::Abort {
-            abort_code: ECONCAT_STRING_LENGTH_TOO_LARGE,
+            abort_code: EINPUT_STRING_LENGTH_TOO_LARGE,
         });
     }
 
-    context.charge(STRING_UTILS_PER_BYTE * NumBytes::new((prefix.len() + suffix.len()) as u64))?;
+    context.charge(
+        AGGREGATOR_V2_STRING_CONCAT_PER_BYTE * NumBytes::new((prefix.len() + suffix.len()) as u64),
+    )?;
 
     let result_value = if let Some((resolver, mut delayed_field_data)) = get_context_data(context) {
         let base_id = aggregator_value_field_as_id(snapshot_value, resolver)?;
