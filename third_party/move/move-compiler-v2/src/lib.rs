@@ -12,8 +12,10 @@ use crate::pipeline::{
     livevar_analysis_processor::LiveVarAnalysisProcessor, visibility_checker::VisibilityChecker,
 };
 use anyhow::bail;
+use codespan::Span;
 use codespan_reporting::term::termcolor::{ColorChoice, StandardStream, WriteColor};
 pub use experiments::*;
+use move_command_line_common::files::FileHash;
 use move_compiler::{
     compiled_unit::{
         AnnotatedCompiledModule, AnnotatedCompiledScript, AnnotatedCompiledUnit, CompiledUnit,
@@ -22,6 +24,7 @@ use move_compiler::{
     diagnostics::FilesSourceText,
     shared::{known_attributes::KnownAttribute, unique_map::UniqueMap},
 };
+use move_ir_types::location::Loc;
 use move_model::{model::GlobalEnv, PackageInfo};
 use move_stackless_bytecode::function_target_pipeline::{
     FunctionTargetPipeline, FunctionTargetsHolder, FunctionVariant,
@@ -169,11 +172,15 @@ pub fn check_errors<W: WriteColor>(
 /// TODO: this currently only fills in defaults. The annotations are only used in
 /// the prover, and compiler v2 is not yet connected to the prover.
 pub fn annotate_units(env: &GlobalEnv, units: Vec<CompiledUnit>) -> Vec<AnnotatedCompiledUnit> {
-    let loc = env.unknown_move_ir_loc();
+    let mut loc = env.unknown_move_ir_loc();
     units
         .into_iter()
         .map(|u| match u {
             CompiledUnit::Module(named_module) => {
+                let mid = named_module.module.self_id();
+                if let (Some(hash), Some(span)) = get_module_file_hash(env, mid.name().as_str()) {
+                    loc = Loc::new(hash, span.start().0, span.end().0);
+                }
                 AnnotatedCompiledUnit::Module(AnnotatedCompiledModule {
                     loc,
                     module_name_loc: loc,
@@ -207,4 +214,15 @@ pub fn make_files_source_text(env: &GlobalEnv) -> FilesSourceText {
         }
     }
     result
+}
+
+fn get_module_file_hash(env: &GlobalEnv, module_name: &str) -> (Option<FileHash>, Option<Span>) {
+    for m in env.get_modules() {
+        let m_name = m.get_name().display(env).to_string();
+        if m_name.as_str() == module_name {
+            let fid = m.get_loc().file_id();
+            return (env.get_file_hash(fid), Some(m.get_loc().span()));
+        }
+    }
+    (None, None)
 }
