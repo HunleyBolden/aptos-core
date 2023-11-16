@@ -18,7 +18,7 @@ use crate::{
     },
     ApiTags,
 };
-use anyhow::{anyhow, Context as AnyhowContext};
+use anyhow::Context as AnyhowContext;
 use aptos_api_types::{
     verify_function_identifier, verify_module_identifier, Address, AptosError, AptosErrorCode,
     AsConverter, EncodeSubmissionRequest, GasEstimation, GasEstimationBcs, HashValue,
@@ -30,7 +30,6 @@ use aptos_api_types::{
 use aptos_crypto::{hash::CryptoHash, signing_message};
 use aptos_types::{
     account_config::CoinStoreResource,
-    account_view::AccountView,
     mempool_status::MempoolStatusCode,
     transaction::{
         EntryFunction, ExecutionStatus, MultisigTransactionPayload, RawTransaction,
@@ -39,6 +38,7 @@ use aptos_types::{
     vm_status::StatusCode,
 };
 use aptos_vm::{data_cache::AsMoveResolver, AptosVM};
+use move_core_types::vm_status::VMStatus;
 use poem_openapi::{
     param::{Path, Query},
     payload::Json,
@@ -52,6 +52,7 @@ generate_error_response!(
     SubmitTransactionError,
     (400, BadRequest),
     (403, Forbidden),
+    (404, NotFound),
     (413, PayloadTooLarge),
     (500, Internal),
     (503, ServiceUnavailable),
@@ -470,36 +471,12 @@ impl TransactionsApi {
                     u64::from(gas_params.vm.txn.maximum_number_of_gas_units);
 
                 // Retrieve account balance to determine max gas available
-                let account_state = context
-                    .get_account_state(
+                let coin_store = context
+                    .expect_resource_poem::<CoinStoreResource, SubmitTransactionError>(
                         signed_transaction.sender(),
                         ledger_info.version(),
                         &ledger_info,
-                    )?
-                    .ok_or_else(|| {
-                        SubmitTransactionError::bad_request_with_code(
-                            "Account not found",
-                            AptosErrorCode::InvalidInput,
-                            &ledger_info,
-                        )
-                    })?;
-                let coin_store: CoinStoreResource = account_state
-                    .get_coin_store_resource()
-                    .and_then(|inner| {
-                        inner.ok_or_else(|| {
-                            anyhow!(
-                                "No coin store found for account {}",
-                                signed_transaction.sender()
-                            )
-                        })
-                    })
-                    .map_err(|err| {
-                        SubmitTransactionError::internal_with_code(
-                            format!("Failed to get coin store resource {}", err),
-                            AptosErrorCode::InternalError,
-                            &ledger_info,
-                        )
-                    })?;
+                    )?;
 
                 let gas_unit_price =
                     estimated_gas_unit_price.unwrap_or_else(|| signed_transaction.gas_unit_price());
@@ -1204,7 +1181,7 @@ impl TransactionsApi {
         txn: SignedTransaction,
     ) -> SimulateTransactionResult<Vec<UserTransaction>> {
         // Transactions shouldn't have a valid signature or this could be used to attack
-        if txn.signature_is_valid() {
+        if txn.verify_signature().is_ok() {
             return Err(SubmitTransactionError::bad_request_with_code(
                 "Simulated transactions must have a non-valid signature",
                 AptosErrorCode::InvalidInput,
@@ -1214,7 +1191,7 @@ impl TransactionsApi {
 
         // Simulate transaction
         let state_view = self.context.latest_state_view_poem(&ledger_info)?;
-        let (_, output) = AptosVM::simulate_signed_transaction(&txn, &state_view);
+        let (vm_status, output) = AptosVM::simulate_signed_transaction(&txn, &state_view);
         let version = ledger_info.version();
 
         // Ensure that all known statuses return their values in the output (even if they aren't supposed to)
@@ -1256,7 +1233,22 @@ impl TransactionsApi {
                 let mut user_transactions = Vec::new();
                 for transaction in transactions.into_iter() {
                     match transaction {
-                        Transaction::UserTransaction(user_txn) => user_transactions.push(*user_txn),
+                        Transaction::UserTransaction(user_txn) => {
+                            let mut txn = *user_txn;
+                            match &vm_status {
+                                VMStatus::Error {
+                                    message: Some(msg), ..
+                                }
+                                | VMStatus::ExecutionFailure {
+                                    message: Some(msg), ..
+                                } => {
+                                    txn.info.vm_status +=
+                                        format!("\nExecution failed with status: {}", msg).as_str();
+                                },
+                                _ => (),
+                            }
+                            user_transactions.push(txn);
+                        },
                         _ => {
                             return Err(SubmitTransactionError::internal_with_code(
                                 "Simulation transaction resulted in a non-UserTransaction",
