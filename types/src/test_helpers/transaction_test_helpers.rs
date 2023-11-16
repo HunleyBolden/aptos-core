@@ -4,7 +4,9 @@
 
 use crate::{
     account_address::AccountAddress,
+    block_executor::config::BlockExecutorOnchainConfig,
     chain_id::ChainId,
+    on_chain_config::BlockGasLimitType,
     transaction::{
         authenticator::AccountAuthenticator,
         signature_verified_transaction::{
@@ -19,9 +21,10 @@ use aptos_crypto::{ed25519::*, traits::*, HashValue};
 const MAX_GAS_AMOUNT: u64 = 1_000_000;
 const TEST_GAS_PRICE: u64 = 100;
 
-// The block gas limit parameter for executor tests
-pub const BLOCK_GAS_LIMIT: Option<u64> = Some(1000);
-// pub const BLOCK_GAS_LIMIT: Option<u64> = None;
+// The block executor onchain config (gas limit parameters) for executor tests
+pub const BLOCK_EXECUTOR_ONCHAIN_CONFIG: BlockExecutorOnchainConfig = BlockExecutorOnchainConfig {
+    block_gas_limit_type: BlockGasLimitType::Limit(1000),
+};
 
 static EMPTY_SCRIPT: &[u8] = include_bytes!("empty_script.mv");
 
@@ -249,9 +252,13 @@ pub fn get_test_txn_with_chain_id(
 
 pub fn block(
     mut user_txns: Vec<Transaction>,
-    maybe_block_gas_limit: Option<u64>,
+    block_executor_onchain_config: BlockExecutorOnchainConfig,
 ) -> Vec<SignatureVerifiedTransaction> {
-    if maybe_block_gas_limit.is_none() {
+    if block_executor_onchain_config
+        .block_gas_limit_type
+        .block_gas_limit()
+        .is_some()
+    {
         user_txns.push(Transaction::StateCheckpoint(HashValue::random()));
     }
     into_signature_verified_block(user_txns)
