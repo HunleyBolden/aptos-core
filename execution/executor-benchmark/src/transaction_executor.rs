@@ -18,7 +18,10 @@ use std::{
 const BLOCK_EXECUTOR_ONCHAIN_CONFIG: BlockExecutorOnchainConfig = BlockExecutorOnchainConfig {
     block_gas_limit_type:
         // present, but large to not limit blocks
-        aptos_types::on_chain_config::BlockGasLimitType::Limit(1_000_000_000),
+        aptos_types::on_chain_config::BlockGasLimitType::LimitWithConflictAware {
+            block_gas_limit: 1_000_000_000,
+            conflict_overlap_window: 8,
+        },
 };
 
 pub(crate) fn is_block_gas_limit() -> bool {

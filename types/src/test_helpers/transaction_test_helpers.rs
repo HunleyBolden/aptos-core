@@ -23,7 +23,10 @@ const TEST_GAS_PRICE: u64 = 100;
 
 // The block executor onchain config (gas limit parameters) for executor tests
 pub const BLOCK_EXECUTOR_ONCHAIN_CONFIG: BlockExecutorOnchainConfig = BlockExecutorOnchainConfig {
-    block_gas_limit_type: BlockGasLimitType::Limit(1000),
+    block_gas_limit_type: BlockGasLimitType::LimitWithConflictAware {
+        block_gas_limit: 1000,
+        conflict_overlap_window: 8,
+    },
 };
 
 static EMPTY_SCRIPT: &[u8] = include_bytes!("empty_script.mv");
