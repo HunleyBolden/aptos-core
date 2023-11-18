@@ -852,9 +852,9 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
             self.def_ana_constant(&name, def, compiled_module);
         }
 
-        // Analyze all functions.
+        // Analyze all functions in the spec mode
         for (idx, (name, fun_def)) in module_def.functions.key_cloned_iter().enumerate() {
-            self.def_ana_fun(&name, fun_def, idx);
+            self.def_ana_fun(&name, fun_def, idx, true);
         }
 
         // Propagate the impurity of functions: a Move function which calls an
@@ -871,6 +871,11 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                 .fun_table
                 .entry(self.qualified_by_module_from_name(&name.0))
                 .and_modify(|e| e.is_pure = is_pure);
+        }
+
+        // Analyze all functions in the move fun mode
+        for (idx, (name, fun_def)) in module_def.functions.key_cloned_iter().enumerate() {
+            self.def_ana_fun(&name, fun_def, idx, false);
         }
 
         // Analyze all schemas. This must be done before other things because schemas need to be
@@ -1228,7 +1233,13 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
     /// Definition analysis for Move functions.
     /// If the function is pure, we translate its body.
     /// If we are operating as a Move compiler, we also translate its body.
-    fn def_ana_fun(&mut self, name: &PA::FunctionName, def: &EA::Function, fun_idx: usize) {
+    fn def_ana_fun(
+        &mut self,
+        name: &PA::FunctionName,
+        def: &EA::Function,
+        fun_idx: usize,
+        as_spec_fun: bool,
+    ) {
         let body = &def.body;
         if let EA::FunctionBody_::Defined(seq) = &body.value {
             let full_name = self.qualified_by_module_from_name(&name.0);
@@ -1271,24 +1282,24 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
             };
 
             // Attempt to translate as specification function
-            let mut et = ExpTranslator::new(self);
-            let (translated, _) = body_translator(&mut et, true);
-            if !et.had_errors {
-                // Rewrite all type annotations in expressions to skip references.
-                for node_id in translated.node_ids() {
-                    let ty = et.get_node_type(node_id);
-                    et.update_node_type(node_id, ty.skip_reference().clone());
+            if as_spec_fun {
+                let mut et = ExpTranslator::new(self);
+                let (translated, _) = body_translator(&mut et, true);
+                if !et.had_errors {
+                    // Rewrite all type annotations in expressions to skip references.
+                    for node_id in translated.node_ids() {
+                        let ty = et.get_node_type(node_id);
+                        et.update_node_type(node_id, ty.skip_reference().clone());
+                    }
+                    et.called_spec_funs.iter().for_each(|(mid, fid)| {
+                        self.parent.add_edge_to_move_fun_call_graph(
+                            self.module_id.qualified(SpecFunId::new(fun_idx)),
+                            mid.qualified(*fid),
+                        );
+                    });
+                    self.spec_funs[self.spec_fun_index].body = Some(translated.into_exp());
                 }
-                et.called_spec_funs.iter().for_each(|(mid, fid)| {
-                    self.parent.add_edge_to_move_fun_call_graph(
-                        self.module_id.qualified(SpecFunId::new(fun_idx)),
-                        mid.qualified(*fid),
-                    );
-                });
-                self.spec_funs[self.spec_fun_index].body = Some(translated.into_exp());
-            }
-
-            if self.compile_move {
+            } else if self.compile_move {
                 // Also translate as regular Move function
                 let mut et = ExpTranslator::new(self);
                 et.set_spec_block_map(spec_block_map);
@@ -1307,7 +1318,9 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                 }
             }
         }
-        self.spec_fun_index += 1; // TODO: why is this at the end? Document or move close to use
+        if as_spec_fun {
+            self.spec_fun_index += 1; // TODO: why is this at the end? Document or move close to use
+        }
     }
 
     /// Propagate the impurity of Move functions from callees to callers so
