@@ -533,7 +533,11 @@ impl<V: VMExecutor> TransactionReplayer for ChunkExecutorInner<V> {
         let mut latest_view = self.commit_queue.lock().expect_latest_view()?;
         let chunk_begin = latest_view.num_transactions() as Version;
         let chunk_end = chunk_begin + transactions.len() as Version; // right-exclusive
-
+                                                                     // TODO (bowu): debug
+        println!(
+            "bowu_chunk_begin: {}, chunk_end: {}",
+            chunk_begin, chunk_end
+        );
         // Find epoch boundaries.
         let mut epochs = Vec::new();
         let mut epoch_begin = chunk_begin; // epoch begin version
